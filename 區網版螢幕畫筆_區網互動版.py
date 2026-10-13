@@ -215,6 +215,16 @@ def make_label(text="", obj=None, wrap=False, align=None):
     return lbl
 
 
+def find_control_panel(widget):
+    """沿著 parent 往上找主控面板；各種大圖視窗的 parent 鏈不一致，所以不能只看直接 parent。"""
+    while widget is not None:
+        cp = getattr(widget, "control_panel", None)
+        if cp is not None:
+            return cp
+        widget = widget.parent()
+    return None
+
+
 def make_card(obj="card"):
     f = QFrame()
     f.setObjectName(obj)
@@ -846,11 +856,11 @@ class HelpDialog(QDialog):
         按「📱 學生連線」顯示 QR Code，學生用 iPad 相機掃描即可在 Safari 開啟並輸入名字加入。</p>
         <h3 style="color:{C.MINT_D}">② 畫記與出題</h3>
         <p>按「開始繪圖」後，畫面會凍結為截圖，可用觸控直接畫記。
-        需要出題時按「✂️ 截圖出題」，在畫面上拖曳框選題目範圍，再選擇
+        需要出題時按「✂ 截圖出題」，在畫面上拖曳框選題目範圍，再選擇
         <b>塗鴉題／選擇題／簡答題／計算題</b>後發送，學生 iPad 會立即收到。</p>
         <p><b>🧮 計算題</b>：學生使用計算紙作答（預設 4 頁、可自行新增到 20 頁；點一格放大書寫、左右滑頁、兩指捏合回全覽），
         儀表板可看每位學生所有頁的總覽，並點任一頁單獨放大。</p>
-        <p>不需要畫記時，也可以直接在主面板按「✂️ 截圖出題」框選畫面出題（按上方「✕ 取消框選」或右鍵可取消）。</p>
+        <p>不需要畫記時，也可以直接在主面板按「✂ 截圖出題」框選畫面出題（按上方「✕ 取消框選」或右鍵可取消）。</p>
         <p><b>📚 題庫</b>：出題視窗按「💾 存入題庫」可先存起來，上課時在題庫按「🚀 派送」即可；題庫可匯出／匯入 ZIP（含截圖原檔）。</p>
         <h3 style="color:{C.PEACH_D}">③ 查看作答</h3>
         <p>「📊 儀表板」會即時顯示學生回答（不需手動更新）。塗鴉與簡答可點卡片放大投影，
@@ -908,55 +918,113 @@ class MissionConfigDialog(QDialog):
         self.setWindowTitle("發送互動任務")
         self.setWindowIcon(app_icon())
 
-        v = QVBoxLayout(self)
-        v.setContentsMargins(px(32), px(28), px(32), px(28))
-        v.setSpacing(px(16))
-        v.addWidget(make_label("🚀 發送互動任務", "h1"))
-        v.addWidget(make_label("學生會在 iPad 上看到這張截圖", "muted"))
-
-        prev_card = make_card("soft")
-        pv = QVBoxLayout(prev_card)
-        pv.setContentsMargins(px(12), px(12), px(12), px(12))
-        preview = ScaledPixmapLabel(self.screenshot)
-        preview.setMinimumHeight(px(240))
-        pv.addWidget(preview)
-        v.addWidget(prev_card, 1)
-
-        v.addWidget(make_label("選擇題型", "h2"))
-        tiles = QHBoxLayout()
-        tiles.setSpacing(px(16))
-        self.tiles = build_type_tiles(self, tiles, self.settings.value("last_mission", MissionType.DRAW))
-        v.addLayout(tiles)
-
-        opt = QHBoxLayout()
-        opt.setSpacing(px(12))
-        opt.addWidget(make_label("題目名稱", "section"))
-        self.title_edit = QLineEdit(f"題目 {len(control_panel.presets.items) + 1}")
-        self.title_edit.setMaxLength(40)
-        self.title_edit.setPlaceholderText("存入題庫時使用的名稱")
-        opt.addWidget(self.title_edit, 1)
-        self.chk_dash = QCheckBox("發送後開啟儀表板")
-        self.chk_dash.setChecked(self.settings.value("open_dash", "true") == "true")
-        opt.addWidget(self.chk_dash)
-        v.addLayout(opt)
-
-        bottom = QHBoxLayout()
-        bottom.addWidget(make_label(f"👥 目前在線 {server.online_count()} 位學生", "chip"))
-        bottom.addStretch()
-        btn_cancel = make_button("取消", height=60)
-        btn_cancel.setMinimumWidth(px(140))
-        btn_cancel.clicked.connect(self.reject)
-        btn_save = make_button("💾 存入題庫", "mint", 60, font_px=18)
-        btn_save.setToolTip("先存起來，之後在「📚 題庫」一鍵派送")
-        btn_save.clicked.connect(self.save_preset)
-        btn_send = make_button("🚀 發送任務", "lav", 60, font_px=19)
-        btn_send.setMinimumWidth(px(220))
-        btn_send.clicked.connect(self.send_mission)
-        bottom.addWidget(btn_cancel)
-        bottom.addWidget(btn_save)
-        bottom.addWidget(btn_send)
-        v.addLayout(bottom)
+        self._compact = False
+        self._full_size = None
+        self._title_text = f"題目 {len(control_panel.presets.items) + 1}"
+        self._checked = self.settings.value("last_mission", MissionType.DRAW)
+        self._dash = self.settings.value("open_dash", "true") == "true"
+        self.outer = QVBoxLayout(self)
+        self.outer.setContentsMargins(0, 0, 0, 0)
+        self.body = None
+        self._build_body()
         fit_resize(self, px(820), px(720))
+
+    def _build_body(self):
+        """依目前 UI.scale 建立內容（縮小模式會暫時把 UI.scale 乘 0.75 後重建）。"""
+        if self.body is not None:
+            self._title_text = self.title_edit.text()
+            self._checked = checked_type(self.tiles)
+            self._dash = self.chk_dash.isChecked()
+            self.outer.removeWidget(self.body)
+            self.body.hide()
+            self.body.deleteLater()
+        old_scale = UI.scale
+        if self._compact:
+            UI.scale = old_scale * 0.75
+        try:
+            body = QWidget()
+            body.setObjectName("missionBody")
+            body.setStyleSheet(build_qss() if self._compact else "")
+            v = QVBoxLayout(body)
+            v.setContentsMargins(px(32), px(28), px(32), px(28))
+            v.setSpacing(px(16))
+            header = QHBoxLayout()
+            header.addWidget(make_label("🚀 發送互動任務", "h1"))
+            header.addStretch()
+            if self._compact:
+                self.btn_shrink = make_button("🗖 還原", height=44, font_px=15)
+                self.btn_shrink.setToolTip("還原為原本大小")
+            else:
+                self.btn_shrink = make_button("🗕 縮小", height=44, font_px=15)
+                self.btn_shrink.setToolTip("將視窗縮小為 75% 大小")
+            self.btn_shrink.clicked.connect(self.toggle_compact)
+            header.addWidget(self.btn_shrink, alignment=Qt.AlignTop)
+            v.addLayout(header)
+            v.addWidget(make_label("學生會在 iPad 上看到這張截圖", "muted"))
+
+            prev_card = make_card("soft")
+            pv = QVBoxLayout(prev_card)
+            pv.setContentsMargins(px(12), px(12), px(12), px(12))
+            preview = ScaledPixmapLabel(self.screenshot)
+            preview.setMinimumHeight(px(240))
+            self.preview = preview
+            pv.addWidget(preview)
+            v.addWidget(prev_card, 1)
+
+            v.addWidget(make_label("選擇題型", "h2"))
+            tiles = QHBoxLayout()
+            tiles.setSpacing(px(16))
+            self.tiles = build_type_tiles(body, tiles, self._checked)
+            v.addLayout(tiles)
+
+            opt = QHBoxLayout()
+            opt.setSpacing(px(12))
+            opt.addWidget(make_label("題目名稱", "section"))
+            self.title_edit = QLineEdit(self._title_text)
+            self.title_edit.setMaxLength(40)
+            self.title_edit.setPlaceholderText("存入題庫時使用的名稱")
+            opt.addWidget(self.title_edit, 1)
+            self.chk_dash = QCheckBox("發送後開啟儀表板")
+            self.chk_dash.setChecked(self._dash)
+            opt.addWidget(self.chk_dash)
+            v.addLayout(opt)
+
+            bottom = QHBoxLayout()
+            bottom.addWidget(make_label(f"👥 目前在線 {self.server.online_count()} 位學生", "chip"))
+            bottom.addStretch()
+            btn_cancel = make_button("取消", height=60)
+            btn_cancel.setMinimumWidth(px(140))
+            btn_cancel.clicked.connect(self.reject)
+            btn_save = make_button("💾 存入題庫", "mint", 60, font_px=18)
+            btn_save.setToolTip("先存起來，之後在「📚 題庫」一鍵派送")
+            btn_save.clicked.connect(self.save_preset)
+            btn_send = make_button("🚀 發送任務", "lav", 60, font_px=19)
+            btn_send.setMinimumWidth(px(220))
+            btn_send.clicked.connect(self.send_mission)
+            bottom.addWidget(btn_cancel)
+            bottom.addWidget(btn_save)
+            bottom.addWidget(btn_send)
+            v.addLayout(bottom)
+        finally:
+            UI.scale = old_scale
+        self.body = body
+        self.outer.addWidget(body)
+
+    def toggle_compact(self):
+        """切換 100% / 75%：內容（字體、按鈕、間距）一起等比縮放，並維持右上角位置不動。"""
+        geo = self.frameGeometry()
+        right, top = geo.right(), geo.top()
+        if not self._compact:
+            self._full_size = self.size()
+            w, h = int(self.width() * 0.75), int(self.height() * 0.75)
+        else:
+            w, h = self._full_size.width(), self._full_size.height()
+        self._compact = not self._compact
+        self.setMinimumSize(0, 0)
+        self._build_body()
+        self.outer.activate()
+        self.resize(w, h)
+        self.move(right - self.frameGeometry().width() + 1, top)
 
     def save_preset(self):
         m_type = checked_type(self.tiles)
@@ -1010,6 +1078,10 @@ class ShowcaseDialog(QDialog):
         top.addSpacing(px(12))
         top.addWidget(self.counter)
         top.addStretch()
+        btn_pen = make_button("✏ 畫記", "lav", 56)
+        btn_pen.setToolTip("定格這張大圖，在上面圈註講解")
+        btn_pen.clicked.connect(self.annotate)
+        top.addWidget(btn_pen)
         top.addWidget(btn_close)
         v.addLayout(top)
 
@@ -1041,6 +1113,11 @@ class ShowcaseDialog(QDialog):
         QShortcut(QKeySequence(Qt.Key_Right), self, lambda: self.go(1))
         self.render_item()
         self.setWindowState(Qt.WindowMaximized)
+
+    def annotate(self):
+        cp = find_control_panel(self)
+        if cp:
+            cp.start_annotation(close=self)
 
     def go(self, d):
         self.index = (self.index + d) % len(self.items)
@@ -1491,7 +1568,7 @@ class PresetEditDialog(QDialog):
         v = QVBoxLayout(self)
         v.setContentsMargins(px(32), px(28), px(32), px(28))
         v.setSpacing(px(14))
-        v.addWidget(make_label("✏️ 編輯題目", "h1"))
+        v.addWidget(make_label("✏ 編輯題目", "h1"))
         card = make_card("soft")
         cv = QVBoxLayout(card)
         cv.setContentsMargins(px(12), px(12), px(12), px(12))
@@ -1578,7 +1655,7 @@ class PresetCard(QFrame):
         btns.addWidget(b_send, 1)
         for text, tip, slot in (("◀", "往前移", lambda: library.move_item(item["id"], -1)),
                                 ("▶", "往後移", lambda: library.move_item(item["id"], 1)),
-                                ("✏️", "編輯", lambda: library.edit_item(item["id"])),
+                                ("✏", "編輯", lambda: library.edit_item(item["id"])),
                                 ("🗑", "刪除", lambda: library.delete_item(item["id"]))):
             b = make_button(text, height=52)
             b.setToolTip(tip)
@@ -2207,6 +2284,10 @@ class CalcViewerDialog(QDialog):
         self.btn_grid = make_button("⊞ 回總覽", "lav", 56)
         self.btn_grid.clicked.connect(lambda: self.show_page(None))
         top.addWidget(self.btn_grid)
+        btn_pen = make_button("✏ 畫記", "lav", 56)
+        btn_pen.setToolTip("定格這張大圖，在上面圈註講解")
+        btn_pen.clicked.connect(self.annotate)
+        top.addWidget(btn_pen)
         btn_close = make_button("✕ 關閉", "pink", 56)
         btn_close.setMinimumWidth(px(140))
         btn_close.clicked.connect(self.accept)
@@ -2267,6 +2348,11 @@ class CalcViewerDialog(QDialog):
         QShortcut(QKeySequence(Qt.Key_Escape), self, lambda: self.show_page(None) if self.page is not None else self.accept())
         self.render()
         self.setWindowState(Qt.WindowMaximized)
+
+    def annotate(self):
+        cp = find_control_panel(self)
+        if cp:
+            cp.start_annotation(close=self)
 
     def go_student(self, d):
         if len(self.entries) > 1:
@@ -2397,11 +2483,15 @@ class DashboardWindow(QMainWindow):
         self.btn_retry = make_button("🔁 重新作答", "peach", 56)
         self.btn_retry.setToolTip("同一張截圖讓學生重新作答，並清空目前的作答紀錄")
         self.btn_retry.clicked.connect(self.retry_mission)
+        btn_pen = make_button("✏ 畫記", "lav", 56)
+        btn_pen.setToolTip("把目前儀表板畫面定格，在上面圈註講解（題目不會被清掉）")
+        # 必須包 lambda：clicked 會送出 checked 布林值，直接接會塞進 start_annotation 的 close 參數
+        btn_pen.clicked.connect(lambda: self.control_panel.start_annotation())
         btn_lib = make_button("📚 題庫", "lemon", 56)
         btn_lib.clicked.connect(self.control_panel.show_library)
         btn_conn = make_button("📱 學生連線", "sky", 56)
         btn_conn.clicked.connect(self.control_panel.show_connection)
-        for b in (self.btn_pause, self.btn_retry, btn_lib, btn_conn):
+        for b in (self.btn_pause, self.btn_retry, btn_pen, btn_lib, btn_conn):
             header.addWidget(b)
         v.addLayout(header)
 
@@ -2422,7 +2512,7 @@ class DashboardWindow(QMainWindow):
         self.btn_draw_lot.clicked.connect(self.lucky_draw)
         bar.addWidget(self.btn_draw_lot)
         self.seg_card = make_button("🗂 卡片", checkable=True)
-        self.seg_cloud = make_button("☁️ 文字雲", checkable=True)
+        self.seg_cloud = make_button("☁ 文字雲", checkable=True)
         for b in (self.seg_card, self.seg_cloud):
             b.setProperty("seg", True)
             b.setMinimumHeight(px(52))
@@ -2457,7 +2547,7 @@ class DashboardWindow(QMainWindow):
         pv.addLayout(bar)
 
         self.stack = QStackedWidget()
-        self.empty = make_label("還沒有題目\n\n在畫筆工具列按「✂️ 截圖出題」發送給學生", "muted", True, Qt.AlignCenter)
+        self.empty = make_label("還沒有題目\n\n在畫筆工具列按「✂ 截圖出題」發送給學生", "muted", True, Qt.AlignCenter)
         self.empty.setStyleSheet(f"font-size:{px(22)}px;")
         self.draw_grid = ResponsiveGrid(px(320), "等待學生作答…")
         self.text_grid = ResponsiveGrid(px(320), "等待學生作答…")
@@ -2953,12 +3043,12 @@ class FullScreenOverlay(QWidget):
                 rect = QRect(self.shape_start, pos).normalized()
                 self.update()
                 if rect.width() > 10 and rect.height() > 10:
-                    self.open_mission_dialog(self.composite().copy(rect))
+                    sent = self.open_mission_dialog(self.composite().copy(rect))
                 else:
                     self.show_save_message("範圍太小，請重新拖曳框選")
                     self.set_tool("region_screenshot")
                     return
-                self.control_panel.region_finished()
+                self.control_panel.region_finished(sent)
             elif self.shape_active:
                 self.shape_active = False
                 p = QPainter(self.drawing_layer)
@@ -2972,6 +3062,7 @@ class FullScreenOverlay(QWidget):
         super().mouseReleaseEvent(event)
 
     def open_mission_dialog(self, region):
+        """開啟出題視窗，回傳題目是否已發送給學生。"""
         cp = self.control_panel
         try:
             dlg = MissionConfigDialog(self, region, cp.server, cp)
@@ -2982,9 +3073,11 @@ class FullScreenOverlay(QWidget):
                 self.show_save_message("🚀 已發送題目給學生")
             elif result == 2:
                 self.show_save_message("💾 已存入題庫")
+            return result == 1
         except Exception as e:
             logging.exception("MissionConfigDialog error")
             QMessageBox.critical(self, "錯誤", f"無法開啟出題視窗：{e}")
+            return False
 
     def paintEvent(self, event):
         if not self.background or not self.drawing_layer:
@@ -3068,9 +3161,9 @@ def screen_factor(screen):
 
 
 class ControlPanel(QWidget):
-    BASE_WIDTH = 240  # 與原雲端版相同：寬度 = 240 × 0.75（1080p）
+    BASE_WIDTH = 120  # 直式單欄窄面板：寬度 = 120 × 0.75（1080p）
     ZOOMS = [0.8, 0.9, 1.0, 1.1, 1.25, 1.4, 1.6]
-    TOOLS = [("pen", "✏️", "畫筆"), ("eraser", "🧽", "橡皮擦"), ("line", "／", "直線"),
+    TOOLS = [("pen", "✏", "畫筆"), ("eraser", "🧽", "橡皮擦"), ("line", "／", "直線"),
              ("rect", "■", "方塊"), ("solid_circle", "●", "實心圓"), ("hollow_circle", "○", "空心圓")]
 
     def __init__(self):
@@ -3086,7 +3179,11 @@ class ControlPanel(QWidget):
             self.zoom = 1.0
 
         self.server = ClassroomServer()
-        ok, info = self.server.start(int(self.settings.value("port", DEFAULT_PORT)))
+        port = int(self.settings.value("port", DEFAULT_PORT))
+        # 可由整合版啟動器以命令列參數指定連接埠（例如：區網版螢幕畫筆_區網互動版.py 8001）
+        if len(sys.argv) > 1 and sys.argv[1].isdigit():
+            port = int(sys.argv[1])
+        ok, info = self.server.start(port)
         if not ok:
             QMessageBox.critical(None, "伺服器啟動失敗", f"無法建立區網伺服器：\n{info}")
 
@@ -3103,6 +3200,8 @@ class ControlPanel(QWidget):
         self.drawing = False
         self.quick_mode = False
         self.collapsed = False
+        self.annotating = False  # 由儀表板「畫記」進入，離開時不清掉題目
+        self.start_expanded = False  # 初始只顯示「開始繪圖」，其餘功能收合
         self.frame = None
         self.k = 0
         self.scale_screen = QApplication.primaryScreen()
@@ -3161,12 +3260,13 @@ class ControlPanel(QWidget):
             self.outer.removeWidget(self.frame)
             self.frame.deleteLater()
         self.setStyleSheet(f"""
-            QFrame#panel {{ background: rgba(255,255,255,250); border: 1px solid {C.LINE}; border-radius: {q(20)}px; }}
-            QPushButton {{ font-size: {q(16)}px; padding: 0 {q(6)}px; border-radius: {q(12)}px; }}
-            QLabel {{ font-size: {q(14)}px; }}
-            QLabel#section {{ font-size: {q(13)}px; }}
-            QComboBox {{ font-size: {q(15)}px; padding: 0 {q(10)}px; min-height: {q(40)}px; border-radius: {q(12)}px; }}
-            QComboBox QAbstractItemView::item {{ min-height: {q(40)}px; }}
+            QFrame#panel {{ background: rgba(255,255,255,250); border: 1px solid {C.LINE}; border-radius: {q(14)}px; }}
+            QPushButton {{ font-size: {q(13)}px; padding: 0 {q(3)}px; border-radius: {q(9)}px; }}
+            QLabel {{ font-size: {q(11)}px; }}
+            QLabel#section {{ font-size: {q(10)}px; }}
+            QComboBox {{ font-size: {q(11)}px; padding: 0 {q(5)}px; min-height: {q(28)}px; border-radius: {q(9)}px; }}
+            QComboBox::drop-down {{ width: {q(16)}px; }}
+            QComboBox QAbstractItemView::item {{ min-height: {q(30)}px; }}
         """)
         frame = QFrame()
         frame.setObjectName("panel")
@@ -3175,14 +3275,15 @@ class ControlPanel(QWidget):
         self.outer.addWidget(frame)
 
         v = QVBoxLayout(frame)
-        v.setContentsMargins(q(10), q(6), q(10), q(12))
-        v.setSpacing(q(8))
+        v.setContentsMargins(q(8), q(4), q(8), q(8))
+        v.setSpacing(q(5))
 
         head = QHBoxLayout()
         head.setSpacing(q(2))
-        handle = DragHandle("⠿ 螢幕畫筆")
-        handle.setStyleSheet(f"font-size:{q(15)}px; font-weight:800; color:{C.MUTED};")
-        handle.setMinimumHeight(q(36))
+        handle = DragHandle("⠿")
+        handle.setToolTip("拖曳移動面板")
+        handle.setStyleSheet(f"font-size:{q(14)}px; font-weight:800; color:{C.MUTED};")
+        handle.setMinimumHeight(q(26))
         head.addWidget(handle, 1)
         self.btn_min = self._head_button("—", self.on_min_clicked)
         self.btn_close = self._head_button("✕", self.close)
@@ -3206,8 +3307,8 @@ class ControlPanel(QWidget):
     def _head_button(self, text, slot):
         b = make_button(text)
         b.setProperty("ghost", True)
-        b.setFixedSize(self.q(36), self.q(36))
-        b.setMinimumHeight(self.q(36))
+        b.setFixedSize(self.q(24), self.q(24))
+        b.setMinimumHeight(self.q(24))
         b.clicked.connect(slot)
         return b
 
@@ -3221,66 +3322,68 @@ class ControlPanel(QWidget):
     def _section(self, text):
         return make_label(text, "section")
 
+    START_BUTTONS = [
+        ("🖊 開始繪圖", "lav", 40, 15, "進入全螢幕繪圖", "on_start_clicked"),
+        ("✂ 截圖出題", "pink", 34, 13, "不進入繪圖，直接框選螢幕畫面出題", "on_quick_mission_clicked"),
+        ("📚 題庫", "lemon", 30, 13, "預先存好的截圖題目，一鍵派送", "show_library"),
+        ("📱 連線", "mint", 30, 13, "顯示學生連線網址與 QR Code", "show_connection"),
+        ("📊 儀表板", "peach", 30, 13, "查看學生作答情況", "show_dashboard"),
+        ("📖 說明", "sky", 28, 13, "操作說明", "show_help"),
+    ]
+
     def build_start_page(self):
         q = self.q
         w = QWidget()
         v = QVBoxLayout(w)
         v.setContentsMargins(0, 0, 0, 0)
-        v.setSpacing(q(8))
+        v.setSpacing(q(5))
+
+        text, tone, h, fs, tip, slot = self.START_BUTTONS[0]
+        main_btn = self._btn(text, tone, h, fs)
+        main_btn.setToolTip(tip)
+        main_btn.clicked.connect(lambda _, name=slot: getattr(self, name)())
+        v.addWidget(main_btn)
+
+        self.btn_more = self._btn("", h=20, fs=12)
+        self.btn_more.setProperty("ghost", True)
+        self.btn_more.clicked.connect(self.toggle_start_more)
+        v.addWidget(self.btn_more)
+
+        self.start_more = QWidget()
+        mv = QVBoxLayout(self.start_more)
+        mv.setContentsMargins(0, 0, 0, 0)
+        mv.setSpacing(q(5))
 
         card = make_card("soft")
         cv = QVBoxLayout(card)
-        cv.setContentsMargins(q(10), q(8), q(10), q(8))
-        cv.setSpacing(q(2))
+        cv.setContentsMargins(q(7), q(5), q(7), q(5))
+        cv.setSpacing(q(1))
         self.status_title = make_label("", wrap=True)
-        self.status_title.setStyleSheet(f"font-size:{q(13)}px; font-weight:700;")
+        self.status_title.setStyleSheet(f"font-size:{q(11)}px; font-weight:700;")
         self.status_url = make_label("", wrap=True)
-        self.status_url.setStyleSheet(f"font-size:{q(15)}px; font-weight:800; color:{C.LAV_D};")
+        self.status_url.setStyleSheet(f"font-size:{q(11)}px; font-weight:800; color:{C.LAV_D};")
         self.status_url.setTextInteractionFlags(Qt.TextSelectableByMouse)
         cv.addWidget(self.status_title)
         cv.addWidget(self.status_url)
-        v.addWidget(card)
+        mv.addWidget(card)
 
-        start_btn = self._btn("🖊️ 開始繪圖", "lav", 60, 19)
-        start_btn.clicked.connect(self.on_start_clicked)
-        v.addWidget(start_btn)
+        for text, tone, h, fs, tip, slot in self.START_BUTTONS[1:]:
+            btn = self._btn(text, tone, h, fs)
+            btn.setToolTip(tip)
+            btn.clicked.connect(lambda _, name=slot: getattr(self, name)())
+            mv.addWidget(btn)
 
-        quick_btn = self._btn("✂️ 截圖出題", "pink", 54, 18)
-        quick_btn.setToolTip("不進入繪圖，直接框選螢幕畫面出題")
-        quick_btn.clicked.connect(lambda: self.on_quick_mission_clicked())
-        v.addWidget(quick_btn)
-
-        lib_btn = self._btn("📚 題庫", "lemon", 46)
-        lib_btn.setToolTip("預先存好的截圖題目，一鍵派送")
-        lib_btn.clicked.connect(self.show_library)
-        v.addWidget(lib_btn)
-
-        row = QHBoxLayout()
-        row.setSpacing(q(6))
-        b_conn = self._btn("📱 連線", "mint", 46)
-        b_conn.clicked.connect(self.show_connection)
-        b_dash = self._btn("📊 儀表板", "peach", 46)
-        b_dash.clicked.connect(self.show_dashboard)
-        row.addWidget(b_conn)
-        row.addWidget(b_dash)
-        v.addLayout(row)
-
-        row2 = QHBoxLayout()
-        row2.setSpacing(q(6))
-        b_help = self._btn("📖 說明", "sky", 42)
-        b_help.clicked.connect(self.show_help)
-        b_small = self._btn("A－", h=42)
+        zrow = QHBoxLayout()
+        zrow.setSpacing(q(4))
+        b_small = self._btn("A－", h=26, fs=12)
         b_small.setToolTip("縮小介面")
-        b_small.setFixedWidth(q(46))
         b_small.clicked.connect(lambda: self.change_zoom(-1))
-        b_big = self._btn("A＋", h=42)
+        b_big = self._btn("A＋", h=26, fs=12)
         b_big.setToolTip("放大介面")
-        b_big.setFixedWidth(q(46))
         b_big.clicked.connect(lambda: self.change_zoom(1))
-        row2.addWidget(b_help, 1)
-        row2.addWidget(b_small)
-        row2.addWidget(b_big)
-        v.addLayout(row2)
+        zrow.addWidget(b_small)
+        zrow.addWidget(b_big)
+        mv.addLayout(zrow)
 
         self.screens = QApplication.screens()
         self.screen_combo = QComboBox()
@@ -3290,127 +3393,128 @@ class ControlPanel(QWidget):
         self.screen_combo.setCurrentIndex(min(self.screen_index, len(self.screens) - 1))
         self.screen_combo.currentIndexChanged.connect(lambda i: setattr(self, "screen_index", i))
         self.screen_combo.setVisible(len(self.screens) > 1)
-        v.addWidget(self.screen_combo)
+        mv.addWidget(self.screen_combo)
 
-        credit = make_label("Made by 阿剛老師 (LAN Ver)", "muted", align=Qt.AlignCenter)
-        credit.setStyleSheet(f"font-size:{q(12)}px;")
-        v.addWidget(credit)
+        credit = make_label("Made by 阿剛老師 (LAN Ver)", "muted", wrap=True, align=Qt.AlignCenter)
+        credit.setStyleSheet(f"font-size:{q(10)}px;")
+        mv.addWidget(credit)
+
+        v.addWidget(self.start_more)
+        self.apply_start_more()
         return w
+
+    def apply_start_more(self):
+        self.start_more.setVisible(self.start_expanded)
+        self.btn_more.setText("▴ 收合" if self.start_expanded else "▾ 更多")
+        self.btn_more.setToolTip("收合連線資訊與其他功能" if self.start_expanded else "展開連線資訊與其他功能")
+
+    def toggle_start_more(self):
+        self.start_expanded = not self.start_expanded
+        self.apply_start_more()
+        self.adjustSize()
+
+    INTERACT_BUTTONS = [
+        ("📚 題庫", "lemon", "show_library"),
+        ("📊 儀表板", "peach", "show_dashboard"),
+        ("📱 連線", "mint", "show_connection"),
+    ]
 
     def build_draw_page(self):
         q = self.q
         w = QWidget()
         b = QVBoxLayout(w)
         b.setContentsMargins(0, 0, 0, 0)
-        b.setSpacing(q(6))
-        inner = self.W - 2 * q(10)
+        b.setSpacing(q(4))
+        inner = self.W - 2 * q(8)
 
         b.addWidget(self._section("畫布"))
-        row = QHBoxLayout()
-        row.setSpacing(q(6))
-        self.btn_white = self._btn("⬜ 白板", h=44, checkable=True, tool=True)
-        self.btn_black = self._btn("⬛ 黑板", h=44, checkable=True, tool=True)
+        self.btn_white = self._btn("⬜ 白板", h=27, fs=13, checkable=True, tool=True)
+        self.btn_black = self._btn("⬛ 黑板", h=27, fs=13, checkable=True, tool=True)
         self.btn_white.clicked.connect(lambda: self.toggle_board(QColor("white")))
         self.btn_black.clicked.connect(lambda: self.toggle_board(QColor("#23463C")))
-        row.addWidget(self.btn_white)
-        row.addWidget(self.btn_black)
-        b.addLayout(row)
+        b.addWidget(self.btn_white)
+        b.addWidget(self.btn_black)
         board = self.overlay.current_board_color
         self.btn_white.setChecked(board is not None and board == QColor("white"))
         self.btn_black.setChecked(board is not None and board != QColor("white"))
 
         b.addWidget(self._section("工具"))
-        grid = QGridLayout()
-        grid.setSpacing(q(6))
-        tw = (inner - 2 * q(6)) // 3
         self.tool_group = QButtonGroup(w)
         self.tool_buttons = {}
-        for i, (key, icon, name) in enumerate(self.TOOLS):
-            btn = make_button(f"{icon}\n{name}", checkable=True, tool=True)
-            btn.setFixedSize(tw, q(56))
-            btn.setStyleSheet(f"font-size:{q(14)}px; padding:0;")
+        for key, icon, name in self.TOOLS:
+            btn = self._btn(f"{icon} {name}", h=27, fs=13, checkable=True, tool=True)
             btn.clicked.connect(lambda _, k=key: self.select_tool(k))
             self.tool_group.addButton(btn)
             self.tool_buttons[key] = btn
-            grid.addWidget(btn, i // 3, i % 3)
-        b.addLayout(grid)
+            b.addWidget(btn)
 
         b.addWidget(self._section("顏色"))
         cgrid = QGridLayout()
-        cgrid.setSpacing(q(6))
-        sw = (inner - 4 * q(6)) // 5
+        cgrid.setSpacing(q(4))
+        sw = (inner - 2 * q(4)) // 3
         color_group = QButtonGroup(w)
         for i, (cname, cval) in enumerate(PEN_COLORS):
             btn = SwatchButton(cval, sw, max(2, q(3)))
             btn.setToolTip(cname)
             btn.clicked.connect(lambda _, c=cval: self.overlay.set_color(QColor(c)))
             color_group.addButton(btn)
-            cgrid.addWidget(btn, i // 5, i % 5)
+            cgrid.addWidget(btn, i // 3, i % 3)
             if i == 0:
                 btn.setChecked(True)
         b.addLayout(cgrid)
 
         b.addWidget(self._section("粗細"))
-        srow = QHBoxLayout()
-        srow.setSpacing(q(4))
-        bw = (inner - 4 * q(4)) // 5
+        sgrid = QGridLayout()
+        sgrid.setSpacing(q(4))
+        bw = (inner - 2 * q(4)) // 3
         size_group = QButtonGroup(w)
-        for size in PEN_SIZES:
+        for i, size in enumerate(PEN_SIZES):
             btn = make_button("", checkable=True, tool=True)
-            btn.setFixedSize(bw, q(40))
+            btn.setFixedSize(bw, q(26))
             btn.setStyleSheet("padding:0;")
             btn.setIcon(self._dot_icon(size))
-            btn.setIconSize(QSize(q(28), q(28)))
+            btn.setIconSize(QSize(q(18), q(18)))
             btn.setToolTip(f"{size} px")
             btn.clicked.connect(lambda _, s=size: self.overlay.set_thickness(s))
             size_group.addButton(btn)
-            srow.addWidget(btn)
+            sgrid.addWidget(btn, i // 3, i % 3)
             if size == 6:
                 btn.setChecked(True)
-        b.addLayout(srow)
+        b.addLayout(sgrid)
 
-        arow = QHBoxLayout()
-        arow.setSpacing(q(6))
         for text, slot in (("↶ 復原", self.overlay.undo), ("🗑 清除", self.overlay.clear_all), ("💾 存檔", self.on_save_clicked)):
-            btn = self._btn(text, h=42, fs=14)
+            btn = self._btn(text, h=26, fs=12)
             btn.clicked.connect(slot)
-            arow.addWidget(btn)
-        b.addLayout(arow)
+            b.addWidget(btn)
 
         b.addWidget(self._section("課堂互動"))
-        self.btn_region = self._btn("✂️ 截圖出題", "lav", 54, 18)
+        self.btn_region = self._btn("✂ 截圖出題", "lav", 34, 14)
         self.btn_region.clicked.connect(lambda: self.on_region_clicked())
         b.addWidget(self.btn_region)
-        lib_btn = self._btn("📚 題庫", "lemon", 44)
-        lib_btn.clicked.connect(self.show_library)
-        b.addWidget(lib_btn)
-        irow = QHBoxLayout()
-        irow.setSpacing(q(6))
-        btn_dash = self._btn("📊 儀表板", "peach", 46)
-        btn_dash.clicked.connect(self.show_dashboard)
-        btn_qr = self._btn("📱 連線", "mint", 46)
-        btn_qr.clicked.connect(self.show_connection)
-        irow.addWidget(btn_dash)
-        irow.addWidget(btn_qr)
-        b.addLayout(irow)
+        for text, tone, slot in self.INTERACT_BUTTONS:
+            btn = self._btn(text, tone, 28, 13)
+            btn.clicked.connect(lambda _, name=slot: getattr(self, name)())
+            b.addWidget(btn)
+
         self.draw_status = make_label("", "muted", align=Qt.AlignCenter)
-        self.draw_status.setStyleSheet(f"font-size:{q(12)}px;")
+        self.draw_status.setStyleSheet(f"font-size:{q(10)}px;")
         b.addWidget(self.draw_status)
 
-        btn_stop = self._btn("❌ 結束繪圖", "pink", 50, 17)
+        btn_stop = self._btn("❌ 結束繪圖", "pink", 30, 14)
         btn_stop.clicked.connect(self.on_stop_drawing)
         b.addWidget(btn_stop)
         return w
 
     def _dot_icon(self, size):
-        d = self.q(28)
+        d = self.q(18)
         pm = QPixmap(d, d)
         pm.fill(Qt.transparent)
         p = QPainter(pm)
         p.setRenderHint(QPainter.Antialiasing)
         p.setPen(Qt.NoPen)
         p.setBrush(QColor(C.INK))
-        r = max(1.5, min(d / 2 - 1, (2 + size * 0.3) * self.k))
+        # 圖示縮小後仍要分辨得出粗細：半徑依 √粗細 映射到可用範圍
+        r = max(1.0, (d / 2 - 1) * (0.3 + 0.7 * (size / PEN_SIZES[-1]) ** 0.5))
         p.drawEllipse(QRectF(d / 2 - r, d / 2 - r, 2 * r, 2 * r))
         p.end()
         return QIcon(pm)
@@ -3438,7 +3542,9 @@ class ControlPanel(QWidget):
         n = self.server.online_count() if self.server.running else 0
         if self.server.running:
             self.status_title.setText(f"🟢 伺服器運行中 · {n} 人在線")
-            self.status_url.setText(self.server.urls()[0].rstrip("/").replace("http://", ""))
+            host, _, port = self.server.urls()[0].rstrip("/").replace("http://", "").partition(":")
+            # 窄面板一行放不下完整網址，連接埠另起一行
+            self.status_url.setText(f"{host}\n:{port}" if port else host)
         else:
             self.status_title.setText("🔴 伺服器未啟動")
             self.status_url.setText("請確認連接埠未被占用")
@@ -3502,19 +3608,60 @@ class ControlPanel(QWidget):
             return False
         self.live_preset_id = pid
         self.server.send_mission(it["type"], pixmap_to_jpeg(pm))
+        if self.drawing:
+            self.leave_drawing_mode()
         if self.settings.value("open_dash", "true") == "true":
             QTimer.singleShot(0, self.show_dashboard)
         return True
 
     # ----- 繪圖模式 -----
+    def confirm_clear_mission(self):
+        """目前有題目在學生手上時，確認是否要清掉重新開始繪圖。"""
+        parent = self.dashboard if self.dashboard and self.dashboard.isVisible() else self
+        box = QMessageBox(parent)
+        box.setStyleSheet(build_qss())  # 蓋掉主控面板的窄版樣式，否則字會被縮到看不清
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("要清空目前的題目嗎？")
+        box.setText("目前有進行中的題目，開始繪圖會清掉學生畫面上的題目與作答紀錄。")
+        box.setInformativeText("想保留題目、只在畫面上圈註講解，請改用「✏ 畫記」。")
+        btn_go = box.addButton("清空並開始繪圖", QMessageBox.AcceptRole)
+        btn_cancel = box.addButton("取消", QMessageBox.RejectRole)
+        box.setDefaultButton(btn_cancel)
+        box.exec_()
+        return box.clickedButton() is btn_go
+
     def on_start_clicked(self):
+        if self.server.mission_type != MissionType.NONE and not self.confirm_clear_mission():
+            return
         self.server.clear_mission()
         screen = self.current_screen()
         self.hide()
         QTimer.singleShot(400, lambda: self.enter_drawing_mode(screen))
 
-    def enter_drawing_mode(self, screen):
-        self.overlay.capture_screenshot(screen)
+    def start_annotation(self, close=None):
+        """「畫記」：定格目前畫面開始圈註，不動到學生手上的題目。
+        close 是要在定格之後關掉的大圖視窗（強制回應視窗會擋住 overlay 收不到筆觸）。"""
+        if self.drawing:  # 已在繪圖／畫記中，把畫面拉回最上層就好
+            self.overlay.show()
+            self.overlay.raise_()
+            self.overlay.activateWindow()
+            return
+        win = close or self.dashboard
+        handle = win.windowHandle() if win else None
+        screen = handle.screen() if handle else self.current_screen()
+        self.hide()  # 先藏起工具列，才不會被拍進定格畫面
+        QTimer.singleShot(400, lambda: self._begin_annotation(screen, close))
+
+    def _begin_annotation(self, screen, close=None):
+        self.overlay.capture_screenshot(screen)  # 此時大圖還在畫面上，會一起被定格
+        if close is not None:
+            close.accept()  # 收掉強制回應視窗，否則 overlay 收不到筆觸
+        self.enter_drawing_mode(screen, annotating=True, capture=False)
+
+    def enter_drawing_mode(self, screen, annotating=False, capture=True):
+        self.annotating = annotating
+        if capture:
+            self.overlay.capture_screenshot(screen)
         self.overlay.setGeometry(screen.geometry())
         self.overlay.show()
         self.overlay.activateWindow()
@@ -3552,18 +3699,23 @@ class ControlPanel(QWidget):
         self.overlay.show()
         self.overlay.activateWindow()
         self.overlay.set_tool("region_screenshot")
-        self.overlay.show_save_message("✂️ 請拖曳框選出題範圍", 2600)
+        self.overlay.show_save_message("✂ 請拖曳框選出題範圍", 2600)
 
-    def region_finished(self):
-        """框選出題結束（已發送或取消）。"""
-        if self.quick_mode:
-            self.quick_mode = False
-            self.overlay.set_tool("pen")
-            self.overlay.hide()
-            self.set_mode(False)
-            self.adjustSize()
-            self.show()
-            self.raise_()
+    def leave_drawing_mode(self):
+        """收起繪圖畫面回到初始畫面；與「結束繪圖」不同，不會清掉已發送的題目。"""
+        self.quick_mode = False
+        self.annotating = False
+        self.overlay.set_tool("pen")
+        self.overlay.hide()
+        self.set_mode(False)
+        self.adjustSize()
+        self.show()
+        self.raise_()
+
+    def region_finished(self, sent=False):
+        """框選出題結束。已把題目發送出去就離開繪圖模式，回到初始畫面。"""
+        if self.quick_mode or (sent and self.drawing):
+            self.leave_drawing_mode()
         else:
             self.select_tool("pen")
         after, self.after_region = self.after_region, None
@@ -3580,7 +3732,7 @@ class ControlPanel(QWidget):
             b.setChecked(False)
         self.tool_group.setExclusive(True)
         self.overlay.set_tool("region_screenshot")
-        self.overlay.show_save_message("✂️ 請在畫面上拖曳框選出題範圍", 2600)
+        self.overlay.show_save_message("✂ 請在畫面上拖曳框選出題範圍", 2600)
 
     def on_save_clicked(self):
         directory = os.path.join(os.getcwd(), "畫記存檔")
@@ -3591,6 +3743,10 @@ class ControlPanel(QWidget):
         self.overlay.show_save_message(f"💾 已存檔：{os.path.basename(filename)}")
 
     def on_stop_drawing(self):
+        if self.annotating:  # 畫記結束：學生還在作答，題目要留著
+            self.leave_drawing_mode()
+            self.show_dashboard()
+            return
         self.server.clear_mission()
         self.overlay.hide()
         self.set_mode(False)
